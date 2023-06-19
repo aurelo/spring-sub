@@ -1,0 +1,3 @@
+.docker_hub_login:
+  before_script:
+    - echo $DOCKER_HUB_ACCESS_TOKEN | docker login -u $DOCKER_HUB_USER --password-stdin

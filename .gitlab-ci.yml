@@ -1,0 +1,101 @@
+stages:
+  - test
+  - dockerize
+  - validate
+
+  
+variables:
+  MAVEN_OPTS: >-
+    -Dhttps.protocols=TLSv1.2
+    -Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository
+    -Dorg.slf4j.simpleLogger.showDateTime=true
+    -Djava.awt.headless=true
+
+  MAVEN_CLI_OPTS: >-
+    --batch-mode
+    --errors
+    --fail-at-end
+    --show-version
+    --no-transfer-progress
+    -DinstallAtEnd=true
+    -DdeployAtEnd=true
+
+image: maven:3.9.2-eclipse-temurin-17-alpine
+
+cache:
+  paths:
+    - .m2/repository
+
+test:
+  stage: test
+  script:
+    - 'mvn $MAVEN_CLI_OPTS test'
+  artifacts:
+    when: on_failure
+    reports:
+      junit: target/surefire-reports/*.xml
+
+
+.dockerfile_template:
+  rules:
+    - if: $CI_COMMIT_BRANCH
+      exists:
+        - "Dockerfile"
+
+.dind_template:
+  image: docker:24.0.2
+  services:
+    - docker:24.0.2-dind
+  extends: .dockerfile_template
+
+push_to_gitlab_docker_registry:
+  stage: dockerize
+  extends: .dind_template
+  before_script:
+    - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER $CI_REGISTRY --password-stdin
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE .
+    - docker push $CI_REGISTRY_IMAGE
+
+
+push_to_docker_hub:
+  stage: dockerize
+  extends: .dind_template
+  variables:
+    DOCKER_HUB_IMAGE: $DOCKER_HUB_USER/$CI_PROJECT_NAME
+  before_script:
+    #- echo $DOCKER_HUB_ACCESS_TOKEN | docker login -u $DOCKER_HUB_USER --password-stdin
+    - !reference [.docker_hub_login, before_script]
+  script:
+    - docker build -t $DOCKER_HUB_IMAGE .
+    - docker push $DOCKER_HUB_IMAGE
+
+
+.curl_anchor: &curl_image
+  image: curlimages/curl
+
+check_health_of_pushed_image:
+  stage: dockerize
+  <<: *curl_image
+  dependencies: []
+  services:
+    - name: $CI_REGISTRY_IMAGE:latest
+      alias: app
+  needs:
+    - push_to_gitlab_docker_registry
+  script:
+    - curl "http://app:8080/actuator/health" | grep "UP"
+
+
+container_scanning:
+  stage: validate
+  variables:
+    CS_IMAGE: $CI_REGISTRY_IMAGE
+
+include:
+  - template: Security/Container-Scanning.gitlab-ci.yml
+  - template: Security/SAST.gitlab-ci.yml 
+  - template: Secret-Detection.gitlab-ci.yml 
+  - template: Code-Quality.gitlab-ci.yml
+  - local: docker_hub.gitlab-ci.yaml
+
